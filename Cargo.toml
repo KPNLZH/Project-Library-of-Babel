@@ -1,0 +1,10 @@
+[package]
+name = "library_of_babel_crypt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+blake3 = "1.8"
+rand = "0.9"
