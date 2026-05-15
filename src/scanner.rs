@@ -20,12 +20,7 @@ pub fn run_scanner(state: Arc<Mutex<AppState>>) {
             Mode::Decrypt {
                 archive_path,
                 password,
-            } => (
-                "decrypt",
-                password.clone(),
-                0,
-                archive_path.clone(),
-            ),
+            } => ("decrypt", password.clone(), 0, archive_path.clone()),
         }
     };
 
@@ -66,17 +61,8 @@ fn run_encrypt(state: Arc<Mutex<AppState>>, password: &str, chunk_size: usize) {
         let mut miss_count: u64 = 0;
 
         loop {
-            if !state.lock().unwrap().running {
-                return;
-            }
-
             let hash_bytes: [u8; 32] = *current_hash.as_bytes();
             hash_count += 1;
-
-            // Update hash display periodically to reduce lock contention
-            if hash_count % 128 == 0 {
-                push_hash_display(&state, &current_hash, hash_count);
-            }
 
             if let Some(pos) = crypto::find_chunk_in_hash(&hash_bytes, chunk) {
                 // ── Match found ──
@@ -88,6 +74,9 @@ fn run_encrypt(state: Arc<Mutex<AppState>>, password: &str, chunk_size: usize) {
                 // Update state with match info
                 {
                     let mut s = state.lock().unwrap();
+                    if !s.running {
+                        return;
+                    }
                     let coord_str = if miss_count > 0 {
                         format!("x{}_0.0, I={}", miss_count, pos)
                     } else {
@@ -98,9 +87,14 @@ fn run_encrypt(state: Arc<Mutex<AppState>>, password: &str, chunk_size: usize) {
                     s.current_chunk = (chunk_idx + 1).min(total_chunks);
                     s.match_flash = 12;
                     s.pointer_pos = (pos * 2).min(54);
-                    s.compression_ratio =
-                        all_coords.len() as f64 / source_data.len() as f64;
-                    update_rate(&mut s, hash_count, &mut last_rate_update, &mut last_count, &start_time);
+                    s.compression_ratio = all_coords.len() as f64 / source_data.len() as f64;
+                    update_rate(
+                        &mut s,
+                        hash_count,
+                        &mut last_rate_update,
+                        &mut last_count,
+                        &start_time,
+                    );
                 }
 
                 // Vectorize: H_next = H(H_i + I)
@@ -111,12 +105,22 @@ fn run_encrypt(state: Arc<Mutex<AppState>>, password: &str, chunk_size: usize) {
                 miss_count += 1;
                 current_hash = crypto::advance_hash(&current_hash);
 
-                // Update stats periodically
-                if miss_count.is_multiple_of(50) {
+                // Update UI and check running flag periodically to avoid locks
+                if hash_count % 10000 == 0 {
+                    push_hash_display(&state, &current_hash, hash_count);
                     let mut s = state.lock().unwrap();
+                    if !s.running {
+                        return;
+                    }
                     s.scan_count = hash_count;
                     s.pointer_pos = (hash_count % 50) as usize;
-                    update_rate(&mut s, hash_count, &mut last_rate_update, &mut last_count, &start_time);
+                    update_rate(
+                        &mut s,
+                        hash_count,
+                        &mut last_rate_update,
+                        &mut last_count,
+                        &start_time,
+                    );
                     if s.match_flash > 0 {
                         s.match_flash = s.match_flash.saturating_sub(1);
                     }
@@ -162,16 +166,15 @@ fn run_decrypt(state: Arc<Mutex<AppState>>, password: &str, archive_path: &str) 
         }
     };
 
-    let (salt_hex, coords, expected_checksum, chunk_size) =
-        match crypto::parse_archive(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                let mut s = state.lock().unwrap();
-                s.status_message = format!("Parse error: {}", e);
-                s.finished = true;
-                return;
-            }
-        };
+    let (salt_hex, coords, expected_checksum, chunk_size) = match crypto::parse_archive(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            let mut s = state.lock().unwrap();
+            s.status_message = format!("Parse error: {}", e);
+            s.finished = true;
+            return;
+        }
+    };
 
     // Update chunk_size from archive
     state.lock().unwrap().chunk_size = chunk_size;
@@ -205,11 +208,20 @@ fn run_decrypt(state: Arc<Mutex<AppState>>, password: &str, archive_path: &str) 
                     hash_count += 1;
 
                     // Update display periodically
-                    if i % 50 == 0 {
+                    if i % 10000 == 0 {
                         push_hash_display(&state, &current_hash, hash_count);
                         let mut s = state.lock().unwrap();
+                        if !s.running {
+                            return;
+                        }
                         s.scan_count = hash_count;
-                        update_rate(&mut s, hash_count, &mut last_rate_update, &mut last_count, &start_time);
+                        update_rate(
+                            &mut s,
+                            hash_count,
+                            &mut last_rate_update,
+                            &mut last_count,
+                            &start_time,
+                        );
                     }
                 }
                 // Display the zero-run
@@ -236,7 +248,13 @@ fn run_decrypt(state: Arc<Mutex<AppState>>, password: &str, archive_path: &str) 
                     s.scan_count = hash_count;
                     // Update source_data with reconstructed bytes
                     s.source_data = output_data.clone();
-                    update_rate(&mut s, hash_count, &mut last_rate_update, &mut last_count, &start_time);
+                    update_rate(
+                        &mut s,
+                        hash_count,
+                        &mut last_rate_update,
+                        &mut last_count,
+                        &start_time,
+                    );
                 }
 
                 current_hash = crypto::vectorize_hash(&current_hash, *pos);
@@ -256,13 +274,9 @@ fn run_decrypt(state: Arc<Mutex<AppState>>, password: &str, archive_path: &str) 
     match std::fs::write(&output_path, &output_data) {
         Ok(()) => {
             if checksum_ok {
-                s.status_message =
-                    format!("Decrypted -> {} (checksum OK)", output_path);
+                s.status_message = format!("Decrypted -> {} (checksum OK)", output_path);
             } else {
-                s.status_message = format!(
-                    "Decrypted -> {} (CHECKSUM MISMATCH!)",
-                    output_path
-                );
+                s.status_message = format!("Decrypted -> {} (CHECKSUM MISMATCH!)", output_path);
             }
         }
         Err(e) => {
@@ -278,11 +292,7 @@ fn run_decrypt(state: Arc<Mutex<AppState>>, password: &str, archive_path: &str) 
 // ─────────────────────────────────────────────────────────────
 
 /// Push hash hex into display lines for TUI animation.
-fn push_hash_display(
-    state: &Arc<Mutex<AppState>>,
-    hash: &blake3::Hash,
-    hash_count: u64,
-) {
+fn push_hash_display(state: &Arc<Mutex<AppState>>, hash: &blake3::Hash, hash_count: u64) {
     let hex = hash.to_hex();
     let hex_str = hex.as_str();
     let mut s = state.lock().unwrap();

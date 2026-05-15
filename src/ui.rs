@@ -89,12 +89,16 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
     // Build styled hex representation of each chunk
     let mut spans: Vec<Span> = Vec::with_capacity(state.total_chunks * 2);
     for i in 0..state.total_chunks {
-        let start = i * state.chunk_size;
+        let start = (i * state.chunk_size).min(state.source_data.len());
         let end = ((i + 1) * state.chunk_size).min(state.source_data.len());
-        let hex: String = state.source_data[start..end]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        let hex: String = if start < end {
+            state.source_data[start..end]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect()
+        } else {
+            "??".repeat(state.chunk_size)
+        };
 
         let style = if i < state.completed_chunks {
             Style::default().fg(COMPLETED)
