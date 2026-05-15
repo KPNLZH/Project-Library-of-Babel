@@ -99,8 +99,8 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
         let style = if i < state.completed_chunks {
             Style::default().fg(COMPLETED)
         } else if i == state.current_chunk {
-            // Pulsing effect
-            if state.tick % 12 < 6 {
+            // Pulsing effect (adjusted for ~250fps)
+            if state.tick % 48 < 24 {
                 Style::default()
                     .fg(Color::Rgb(20, 20, 30))
                     .bg(HIGHLIGHT)
@@ -215,7 +215,8 @@ fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
         }
 
         // Scroll offset: each line scrolls at a different speed for parallax
-        let speed = (row + 1) * 2;
+        // Adjusted for ~250fps (speed 1, 2, 3 chars per frame)
+        let speed = row + 1;
         let offset = (state.tick as usize * speed) % line_data.len();
 
         let visible: String = line_data.chars().cycle().skip(offset).take(width).collect();

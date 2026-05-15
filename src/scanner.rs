@@ -73,8 +73,10 @@ fn run_encrypt(state: Arc<Mutex<AppState>>, password: &str, chunk_size: usize) {
             let hash_bytes: [u8; 32] = *current_hash.as_bytes();
             hash_count += 1;
 
-            // Update hash display every iteration
-            push_hash_display(&state, &current_hash, hash_count);
+            // Update hash display periodically to reduce lock contention
+            if hash_count % 128 == 0 {
+                push_hash_display(&state, &current_hash, hash_count);
+            }
 
             if let Some(pos) = crypto::find_chunk_in_hash(&hash_bytes, chunk) {
                 // ── Match found ──

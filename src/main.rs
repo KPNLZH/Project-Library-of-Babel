@@ -64,8 +64,8 @@ fn main() -> io::Result<()> {
         scanner::run_scanner(scanner_state);
     });
 
-    // ── Main render loop (~60 fps) ──
-    let target_frame_time = Duration::from_millis(16);
+    // ── Main render loop (~250 fps) ──
+    let target_frame_time = Duration::from_millis(4);
 
     loop {
         let frame_start = Instant::now();
