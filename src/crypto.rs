@@ -1,17 +1,17 @@
 //! Core encryption/decryption logic for the Project Library of Babel system.
 //!
 //! Implements the hash-dictionary-space scanning algorithm:
-//!   G₀ = H(P + S), then for each chunk scan H_i until match.
+//!   G₀ = H(P + S + ChunkIdx), then for each chunk scan H_i until match.
 
 use rand::Rng;
 
-/// A single entry in the coordinate list.
-#[derive(Debug, Clone)]
-pub enum CoordEntry {
-    /// Match found at byte position I within the 32-byte hash.
-    Index(usize),
+/// A single match coordinate for a chunk.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchCoord {
     /// N consecutive misses (hash advances without a match).
-    ZeroRun(u64),
+    pub misses: u64,
+    /// Match found at byte position I within the 32-byte hash.
+    pub index: usize,
 }
 
 // ── Primitive operations ──
@@ -26,24 +26,18 @@ pub fn generate_salt() -> [u8; 16] {
     salt
 }
 
-/// G₀ = H(P + S)
-pub fn compute_seed(password: &[u8], salt: &[u8]) -> blake3::Hash {
-    let mut input = Vec::with_capacity(password.len() + salt.len());
+/// G₀ = H(P + S + chunk_idx)
+pub fn compute_seed_for_chunk(password: &[u8], salt: &[u8], chunk_idx: usize) -> blake3::Hash {
+    let mut input = Vec::with_capacity(password.len() + salt.len() + 8);
     input.extend_from_slice(password);
     input.extend_from_slice(salt);
+    input.extend_from_slice(&(chunk_idx as u64).to_le_bytes());
     blake3::hash(&input)
 }
 
 /// H_{i+1} = H(H_i)
 pub fn advance_hash(hash: &blake3::Hash) -> blake3::Hash {
     blake3::hash(hash.as_bytes())
-}
-
-/// H_next = H(H_i + I)  (vectorization)
-pub fn vectorize_hash(hash: &blake3::Hash, index: usize) -> blake3::Hash {
-    let mut input = hash.as_bytes().to_vec();
-    input.extend_from_slice(&(index as u32).to_le_bytes());
-    blake3::hash(&input)
 }
 
 /// Search for `chunk` as a contiguous subsequence within the 32-byte hash.
@@ -73,15 +67,18 @@ pub fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-// ── Output format ──
+// ── Text format (legacy .babel.txt) ──────────────────────────────────────────
 
 /// Serialize coordinates to the body string: "14, x8_0.0, 7, 22, ..."
-pub fn format_coords(coords: &[CoordEntry]) -> String {
+pub fn format_coords(coords: &[MatchCoord]) -> String {
     coords
         .iter()
-        .map(|c| match c {
-            CoordEntry::Index(pos) => pos.to_string(),
-            CoordEntry::ZeroRun(n) => format!("x{}_0.0", n),
+        .map(|c| {
+            if c.misses > 0 {
+                format!("x{}_0.0, {}", c.misses, c.index)
+            } else {
+                c.index.to_string()
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -90,7 +87,7 @@ pub fn format_coords(coords: &[CoordEntry]) -> String {
 /// Build the complete archive text file.
 pub fn format_output(
     salt_hex: &str,
-    coords: &[CoordEntry],
+    coords: &[MatchCoord],
     checksum: &str,
     chunk_size: usize,
 ) -> String {
@@ -113,10 +110,10 @@ pub fn format_output(
     )
 }
 
-// ── Archive parser ──
+// ── Archive parser ────────────────────────────────────────────────────────────
 
 /// Parse an archive file back into its components.
-pub fn parse_archive(content: &str) -> Result<(String, Vec<CoordEntry>, String, usize), String> {
+pub fn parse_archive(content: &str) -> Result<(String, Vec<MatchCoord>, String, usize), String> {
     let mut salt = String::new();
     let mut chunk_size: usize = 1;
     let mut checksum = String::new();
@@ -126,18 +123,9 @@ pub fn parse_archive(content: &str) -> Result<(String, Vec<CoordEntry>, String, 
     for line in content.lines() {
         let t = line.trim();
         match t {
-            "[Header]" => {
-                section = "header";
-                continue;
-            }
-            "[Body]" => {
-                section = "body";
-                continue;
-            }
-            "[Footer]" => {
-                section = "footer";
-                continue;
-            }
+            "[Header]" => { section = "header"; continue; }
+            "[Body]"   => { section = "body";   continue; }
+            "[Footer]" => { section = "footer"; continue; }
             _ => {}
         }
         match section {
@@ -150,9 +138,7 @@ pub fn parse_archive(content: &str) -> Result<(String, Vec<CoordEntry>, String, 
             }
             "body" => {
                 if !t.is_empty() {
-                    if !body.is_empty() {
-                        body.push_str(", ");
-                    }
+                    if !body.is_empty() { body.push_str(", "); }
                     body.push_str(t);
                 }
             }
@@ -172,64 +158,66 @@ pub fn parse_archive(content: &str) -> Result<(String, Vec<CoordEntry>, String, 
     Ok((salt, coords, checksum, chunk_size))
 }
 
-fn parse_coords(body: &str) -> Result<Vec<CoordEntry>, String> {
+fn parse_coords(body: &str) -> Result<Vec<MatchCoord>, String> {
     let mut entries = Vec::new();
+    let mut current_misses = 0u64;
+
     for part in body.split(',') {
         let p = part.trim();
-        if p.is_empty() {
-            continue;
-        }
+        if p.is_empty() { continue; }
         if let Some(rest) = p.strip_prefix('x') {
             let count_str = rest
                 .strip_suffix("_0.0")
                 .ok_or_else(|| format!("Invalid zero-run: '{}'", p))?;
-            let count: u64 = count_str
+            current_misses = count_str
                 .parse()
                 .map_err(|e| format!("Invalid zero-run count '{}': {}", p, e))?;
-            entries.push(CoordEntry::ZeroRun(count));
         } else {
-            let idx: usize = p
+            let index: usize = p
                 .parse()
                 .map_err(|e| format!("Invalid index '{}': {}", p, e))?;
-            entries.push(CoordEntry::Index(idx));
+            entries.push(MatchCoord { misses: current_misses, index });
+            current_misses = 0;
         }
     }
     Ok(entries)
 }
 
-// ── Decrypt ──
+// ── Decrypt (shared by text and binary paths) ─────────────────────────────────
 
 /// Reconstruct original data from an archive's coordinates.
-#[allow(dead_code)]
 pub fn decrypt(
-    salt_hex: &str,
+    salt_bytes: &[u8],
     password: &str,
-    coords: &[CoordEntry],
+    coords: &[MatchCoord],
     chunk_size: usize,
 ) -> Result<Vec<u8>, String> {
-    let salt = hex_decode(salt_hex)?;
-    let mut current_hash = compute_seed(password.as_bytes(), &salt);
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(coords.len() * chunk_size);
 
-    for entry in coords {
-        match entry {
-            CoordEntry::ZeroRun(count) => {
-                for _ in 0..*count {
-                    current_hash = advance_hash(&current_hash);
-                }
-            }
-            CoordEntry::Index(pos) => {
-                let hash_bytes = current_hash.as_bytes();
-                let start = *pos;
-                let end = (start + chunk_size).min(32);
-                if start >= 32 {
-                    return Err(format!("Index {} out of range (hash is 32 bytes)", pos));
-                }
-                output.extend_from_slice(&hash_bytes[start..end]);
-                current_hash = vectorize_hash(&current_hash, *pos);
-            }
+    for (chunk_idx, coord) in coords.iter().enumerate() {
+        let mut current_hash = compute_seed_for_chunk(password.as_bytes(), salt_bytes, chunk_idx);
+        for _ in 0..coord.misses {
+            current_hash = advance_hash(&current_hash);
         }
+        
+        let hash_bytes = current_hash.as_bytes();
+        let start = coord.index;
+        let end = (start + chunk_size).min(32);
+        if start >= 32 {
+            return Err(format!("Index {} out of range (hash is 32 bytes)", coord.index));
+        }
+        output.extend_from_slice(&hash_bytes[start..end]);
     }
 
     Ok(output)
+}
+
+// ── Output size analysis ──────────────────────────────────────────────────────
+
+/// Expected average hashes needed per chunk of given size.
+pub fn avg_hashes_per_chunk(chunk_size: usize) -> f64 {
+    if chunk_size == 0 || chunk_size > 32 { return f64::INFINITY; }
+    let windows = (33 - chunk_size) as f64;
+    let total_values = (256u64.pow(chunk_size as u32)) as f64;
+    1.0 / (windows / total_values)
 }

@@ -1,6 +1,30 @@
 //! Shared application state between the UI thread and the scanner thread.
 //! Wrapped in `Arc<Mutex<>>` for thread-safe access.
 
+/// Output format selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Human-readable text archive (.babel.txt) — original format.
+    Text,
+    /// Compact binary archive (.babel.bin) — ANS/range-coded.
+    Binary,
+}
+
+impl OutputFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            OutputFormat::Text => ".babel.txt",
+            OutputFormat::Binary => ".babel.bin",
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            OutputFormat::Text => "TXT",
+            OutputFormat::Binary => "BIN",
+        }
+    }
+}
+
 /// Operating mode of the application.
 pub enum Mode {
     Encrypt {
@@ -8,10 +32,12 @@ pub enum Mode {
         input_path: String,
         password: String,
         chunk_size: usize,
+        format: OutputFormat,
     },
     Decrypt {
         archive_path: String,
         password: String,
+        format: OutputFormat,
     },
 }
 
@@ -37,6 +63,8 @@ pub struct AppState {
     pub hash_rate: f64,
     pub compression_ratio: f64,
     pub elapsed_secs: f64,
+    /// Estimated binary-coded size in bytes (updated as chunks complete).
+    pub estimated_bin_bytes: usize,
 
     // ── Control ──
     pub running: bool,
@@ -53,10 +81,12 @@ impl AppState {
         input_path: &str,
         password: &str,
         chunk_size: usize,
+        format: OutputFormat,
     ) -> std::io::Result<Self> {
         let source = std::fs::read(input_path)?;
         let total = source.len().div_ceil(chunk_size);
-        let output_path = format!("{}.babel.txt", input_path);
+        let ext = format.extension();
+        let output_path = format!("{}{}", input_path, ext);
 
         Ok(Self {
             source_data: source,
@@ -73,12 +103,14 @@ impl AppState {
             hash_rate: 0.0,
             compression_ratio: 0.0,
             elapsed_secs: 0.0,
+            estimated_bin_bytes: 0,
             running: true,
             tick: 0,
             mode: Mode::Encrypt {
                 input_path: input_path.to_string(),
                 password: password.to_string(),
                 chunk_size,
+                format,
             },
             output_path,
             finished: false,
@@ -88,24 +120,38 @@ impl AppState {
 
     /// Create state for decryption mode.
     pub fn new_decrypt(archive_path: &str, password: &str) -> std::io::Result<Self> {
-        let content = std::fs::read_to_string(archive_path)?;
-        let (_, coords, _, chunk_size) = crate::crypto::parse_archive(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        // Count only Index entries as "chunks to reconstruct"
-        let total_data_entries = coords
-            .iter()
-            .filter(|c| matches!(c, crate::crypto::CoordEntry::Index(_)))
-            .count();
-
-        let output_path = if archive_path.ends_with(".babel.txt") {
-            archive_path.replace(".babel.txt", ".dec")
+        // Detect format from extension
+        let format = if archive_path.ends_with(".babel.bin") {
+            OutputFormat::Binary
         } else {
-            format!("{}.dec", archive_path)
+            OutputFormat::Text
+        };
+
+        let (total_data_entries, chunk_size, output_path) = match format {
+            OutputFormat::Text => {
+                let content = std::fs::read_to_string(archive_path)?;
+                let (_, coords, _, cs) = crate::crypto::parse_archive(&content)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let count = coords.len();
+                let out = if archive_path.ends_with(".babel.txt") {
+                    archive_path.replace(".babel.txt", ".dec")
+                } else {
+                    format!("{}.dec", archive_path)
+                };
+                (count, cs, out)
+            }
+            OutputFormat::Binary => {
+                let data = std::fs::read(archive_path)?;
+                let (_, _, coords, cs) = crate::codec::decode(&data)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let count = coords.len();
+                let out = archive_path.replace(".babel.bin", ".dec");
+                (count, cs as usize, out)
+            }
         };
 
         Ok(Self {
-            source_data: Vec::new(), // Will be filled during decryption
+            source_data: Vec::new(),
             completed_chunks: 0,
             current_chunk: 0,
             total_chunks: total_data_entries,
@@ -119,11 +165,13 @@ impl AppState {
             hash_rate: 0.0,
             compression_ratio: 0.0,
             elapsed_secs: 0.0,
+            estimated_bin_bytes: 0,
             running: true,
             tick: 0,
             mode: Mode::Decrypt {
                 archive_path: archive_path.to_string(),
                 password: password.to_string(),
+                format,
             },
             output_path,
             finished: false,

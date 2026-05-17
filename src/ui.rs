@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{AppState, Mode};
+use crate::app::{AppState, Mode, OutputFormat};
 
 // ── Color Palette ──
 const BG: Color = Color::Rgb(15, 15, 25);
@@ -24,16 +24,15 @@ const ZERO_RUN: Color = Color::Rgb(90, 90, 110);
 const STATUS_VAL: Color = Color::Rgb(0, 200, 255);
 const LABEL: Color = Color::Rgb(100, 100, 140);
 const SEPARATOR: Color = Color::Rgb(60, 60, 90);
+const BIN_COLOR: Color = Color::Rgb(180, 120, 255);
 
 /// Main draw entry point — called every frame from the main loop.
 pub fn draw_ui(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
-    // Fill background
     let bg_block = Block::default().style(Style::default().bg(BG));
     frame.render_widget(bg_block, area);
 
-    // ── Main vertical split: Top(3) | Middle(fill) | Bottom(3) ──
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -43,7 +42,6 @@ pub fn draw_ui(frame: &mut Frame, state: &AppState) {
         ])
         .split(area);
 
-    // ── Middle horizontal split: Left(30%) | Right(70%) ──
     let middle_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -65,13 +63,14 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
         0.0
     };
 
-    let mode_label = match &state.mode {
-        Mode::Encrypt { .. } => "Encrypt",
-        Mode::Decrypt { .. } => "Decrypt",
+    let (mode_label, fmt_label) = match &state.mode {
+        Mode::Encrypt { format, .. } => ("Encrypt", format.label()),
+        Mode::Decrypt { format, .. } => ("Decrypt", format.label()),
     };
+
     let title = format!(
-        " \u{1F4E6} {} [{}/{}] {:.0}% ",
-        mode_label, state.completed_chunks, state.total_chunks, pct
+        " \u{1F4E6} {} [{}] [{}/{}] {:.0}% ",
+        mode_label, fmt_label, state.completed_chunks, state.total_chunks, pct
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -82,11 +81,8 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
+    if inner.width == 0 || inner.height == 0 { return; }
 
-    // Build styled hex representation of each chunk
     let mut spans: Vec<Span> = Vec::with_capacity(state.total_chunks * 2);
     for i in 0..state.total_chunks {
         let start = (i * state.chunk_size).min(state.source_data.len());
@@ -103,16 +99,10 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
         let style = if i < state.completed_chunks {
             Style::default().fg(COMPLETED)
         } else if i == state.current_chunk {
-            // Pulsing effect (adjusted for ~250fps)
             if state.tick % 48 < 24 {
-                Style::default()
-                    .fg(Color::Rgb(20, 20, 30))
-                    .bg(HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Rgb(20, 20, 30)).bg(HIGHLIGHT).add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-                    .fg(HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default().fg(DARK)
@@ -124,8 +114,7 @@ fn draw_source(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     }
 
-    let paragraph = Paragraph::new(Line::from(spans));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -144,9 +133,7 @@ fn draw_hierarchy(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.height == 0 {
-        return;
-    }
+    if inner.height == 0 { return; }
 
     let max_visible = inner.height as usize;
     let start = state.coordinates.len().saturating_sub(max_visible);
@@ -157,9 +144,7 @@ fn draw_hierarchy(frame: &mut Frame, state: &AppState, area: Rect) {
         .map(|(idx, coord)| {
             let is_latest = start + idx == state.coordinates.len().saturating_sub(1);
             let style = if is_latest && state.match_flash > 0 {
-                Style::default()
-                    .fg(HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
             } else if coord.contains("0.0") {
                 Style::default().fg(ZERO_RUN)
             } else {
@@ -170,19 +155,14 @@ fn draw_hierarchy(frame: &mut Frame, state: &AppState, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).style(Style::default().bg(BG));
-    frame.render_widget(list, inner);
+    frame.render_widget(List::new(items).style(Style::default().bg(BG)), inner);
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Middle-Right: Hash Scanner (Scene)
 // ─────────────────────────────────────────────────────────────
 fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
-    let border_color = if state.match_flash > 6 {
-        BORDER_FLASH
-    } else {
-        BORDER
-    };
+    let border_color = if state.match_flash > 6 { BORDER_FLASH } else { BORDER };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -198,11 +178,8 @@ fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let width = inner.width as usize;
     let height = inner.height as usize;
-    if width == 0 || height == 0 {
-        return;
-    }
+    if width == 0 || height == 0 { return; }
 
-    // Reserve 2 lines at bottom for pointer + info
     let hash_row_count = height.saturating_sub(2).max(1);
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
@@ -211,27 +188,19 @@ fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
         let line_data = &state.hash_lines[line_idx];
 
         if line_data.is_empty() {
-            lines.push(Line::from(Span::styled(
-                " ".repeat(width),
-                Style::default().fg(DARK),
-            )));
+            lines.push(Line::from(Span::styled(" ".repeat(width), Style::default().fg(DARK))));
             continue;
         }
 
-        // Scroll offset: each line scrolls at a different speed for parallax
-        // Adjusted for ~250fps (speed 1, 2, 3 chars per frame)
         let speed = row + 1;
         let offset = (state.tick as usize * speed) % line_data.len();
-
         let visible: String = line_data.chars().cycle().skip(offset).take(width).collect();
-
         let is_pointer_row = row == state.pointer_line_idx % hash_row_count;
 
         let spans: Vec<Span> = visible
             .chars()
             .enumerate()
             .map(|(col, ch)| {
-                // Match flash highlight near pointer
                 let in_match_zone = state.match_flash > 0
                     && is_pointer_row
                     && col >= state.pointer_pos.saturating_sub(6)
@@ -240,13 +209,9 @@ fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
                 if in_match_zone {
                     Span::styled(
                         ch.to_string(),
-                        Style::default()
-                            .fg(Color::Rgb(20, 20, 30))
-                            .bg(HIGHLIGHT)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Rgb(20, 20, 30)).bg(HIGHLIGHT).add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    // Subtle color variation per character
                     let g = 150u8.wrapping_add(((col * 7 + row * 19) % 80) as u8);
                     let b = 130u8.wrapping_add(((col * 5 + row * 13) % 70) as u8);
                     let r = 40u8.wrapping_add(((col * 3 + row * 11) % 50) as u8);
@@ -258,41 +223,32 @@ fn draw_scanner(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(spans));
     }
 
-    // ── Pointer line ──
+    // Pointer line
     let ptr_pos = state.pointer_pos.min(width.saturating_sub(1));
     let mut pointer_chars: Vec<Span> = Vec::with_capacity(width);
     for col in 0..width {
         if col == ptr_pos {
             pointer_chars.push(Span::styled(
                 "\u{25B2}",
-                Style::default()
-                    .fg(HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD),
             ));
         } else if col == ptr_pos.wrapping_sub(1) || col == ptr_pos + 1 {
-            pointer_chars.push(Span::styled(
-                "\u{2500}",
-                Style::default().fg(Color::Rgb(180, 140, 0)),
-            ));
+            pointer_chars.push(Span::styled("\u{2500}", Style::default().fg(Color::Rgb(180, 140, 0))));
         } else {
             pointer_chars.push(Span::styled(" ", Style::default()));
         }
     }
     lines.push(Line::from(pointer_chars));
 
-    // ── Info line ──
+    // Info line
     let info = format!(
         " Scan #{} | Hash: BLAKE3-256 | Dict offset: {} ",
         state.scan_count,
         state.scan_count.wrapping_mul(32)
     );
-    lines.push(Line::from(Span::styled(
-        info,
-        Style::default().fg(Color::Rgb(70, 70, 100)),
-    )));
+    lines.push(Line::from(Span::styled(info, Style::default().fg(Color::Rgb(70, 70, 100)))));
 
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -319,6 +275,16 @@ fn draw_status(frame: &mut Frame, state: &AppState, area: Rect) {
         format!("{:.0} h/s", state.hash_rate)
     };
 
+    let bin_size_str = if state.estimated_bin_bytes > 0 {
+        if state.estimated_bin_bytes >= 1024 {
+            format!("~{}KB", state.estimated_bin_bytes / 1024)
+        } else {
+            format!("~{}B", state.estimated_bin_bytes)
+        }
+    } else {
+        "—".to_string()
+    };
+
     let sep = Span::styled(" \u{2502} ", Style::default().fg(SEPARATOR));
 
     let line = if state.finished && !state.status_message.is_empty() {
@@ -327,15 +293,26 @@ fn draw_status(frame: &mut Frame, state: &AppState, area: Rect) {
             Style::default().fg(COMPLETED).add_modifier(Modifier::BOLD),
         ))
     } else {
+        let format_label = match &state.mode {
+            Mode::Encrypt { format, .. } | Mode::Decrypt { format, .. } => format.label(),
+        };
+        let fmt_color = match format_label {
+            "BIN" => BIN_COLOR,
+            _     => Color::Rgb(180, 120, 80),
+        };
+
         Line::from(vec![
             Span::styled(" Rate: ", Style::default().fg(LABEL)),
             Span::styled(rate_str, Style::default().fg(STATUS_VAL).add_modifier(Modifier::BOLD)),
             sep.clone(),
-            Span::styled("Compress: ", Style::default().fg(LABEL)),
+            Span::styled("Ratio: ", Style::default().fg(LABEL)),
             Span::styled(
                 format!("{:.4}x", state.compression_ratio),
                 Style::default().fg(STATUS_VAL).add_modifier(Modifier::BOLD),
             ),
+            sep.clone(),
+            Span::styled("BinEst: ", Style::default().fg(LABEL)),
+            Span::styled(bin_size_str, Style::default().fg(BIN_COLOR).add_modifier(Modifier::BOLD)),
             sep.clone(),
             Span::styled("Elapsed: ", Style::default().fg(LABEL)),
             Span::styled(
@@ -349,14 +326,13 @@ fn draw_status(frame: &mut Frame, state: &AppState, area: Rect) {
                 Style::default().fg(COMPLETED).add_modifier(Modifier::BOLD),
             ),
             sep,
-            Span::styled("Dict: ", Style::default().fg(LABEL)),
+            Span::styled("Fmt: ", Style::default().fg(LABEL)),
             Span::styled(
-                "BLAKE3",
-                Style::default().fg(Color::Rgb(180, 120, 255)).add_modifier(Modifier::BOLD),
+                format_label,
+                Style::default().fg(fmt_color).add_modifier(Modifier::BOLD),
             ),
         ])
     };
 
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(line), inner);
 }
